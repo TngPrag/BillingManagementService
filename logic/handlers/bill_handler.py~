@@ -1,0 +1,474 @@
+from collections import defaultdict
+import uuid
+from datetime import datetime
+import os
+from typing import Optional
+from logic.utils.email_utils import send_email
+from logic.utils.bill_reminder import schedule_bill_reminders
+from fastapi.responses import JSONResponse
+from fastapi import Request, status, Path,BackgroundTasks
+from logic.core import payment_history_model
+from logic.utils.db_dependency import get_db
+from logic.utils.get_month import get_month_key
+from logic.core import bill_model
+from logic.core import user_model
+from logic.DTO import bill_dto  # Use CreateBillDto, UpdateBillDto, BillResponseDto
+from logic.DTO.report_dto import (
+    AdminReportDto,
+    AdminTopBillerDto,
+    AdminTopDebtorDto,
+    MonthlyReportDto,
+    BillerReportDto,
+    BillerCustomerBillSummaryDto,
+    CustomerReportDto,
+    CustomerBillByBillerDto,
+    PaymentHistoryDto,
+)
+# CREATE bill (for biller only)
+async def write_bill_handler(request: Request, user, background_tasks: BackgroundTasks):
+    if user.role != "biller":
+        return JSONResponse(
+            {"detail": "Not authorized to create bills"},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        body = await request.json()  # <--- await here
+        dto = bill_dto.CreateBillDto(**body)
+    except Exception:
+        return JSONResponse(
+            {"detail": "Invalid bill data"},
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+
+    # Get a DB session (assuming a sync generator)
+    db = next(get_db())  # or however you get your DB session
+
+    new_bill = {
+        "customer_id": dto.customer_id,
+        "biller_id": user.id,
+        "amount": dto.amount,
+        "due_date": dto.due_date,
+        "status": dto.status,
+        "description": dto.description,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+
+    # This is a sync function; don't await
+    result = bill_model.create_bill(db, new_bill)
+
+    if not result.success:
+        return JSONResponse(
+            content={"detail": result.error},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Schedule bill reminders using background tasks
+    customer = user_model.get_user_by_id(db, dto.customer_id)  # Assuming sync call here too
+    # If user_model.get_user_by_id is async, then you must await and adjust DB session accordingly
+    if customer:
+        background_tasks.add_task(
+            schedule_bill_reminders,
+            due_date=dto.due_date,
+            customer_email=customer.email,
+            bill_description=dto.description,
+            from_email=os.getenv("SMTP_USER"),
+            from_password=os.getenv("SMTP_PASS"),
+        )
+
+    return JSONResponse(
+        content=result.data.__dict__,
+        status_code=status.HTTP_201_CREATED,
+    )
+# read bill by bill_id : privileged to biller
+async def read_bill_handler(request: Request, bill_id: str, user):
+    if user.role != "biller":
+        return JSONResponse(
+            content={"detail": "Not authorized"},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    db = next(get_db())
+    bill_id = uuid.UUID(bill_id)
+    result = bill_model.get_bill_by_id(db, bill_id)
+    if not result.success:
+        return JSONResponse(
+            content={"detail": result.error},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    return JSONResponse(
+        content=result.data.__dict__,
+        status_code=status.HTTP_200_OK
+    )
+
+
+# UPDATE bill by ID
+async def update_bill_handler(request: Request, bill_id: str = Path(...), user=None):
+    if user.role != "biller":
+        return JSONResponse(
+           content={"detail": "Not authorized"},
+            status_code=status.HTTP_403_FORBIDDEN
+        )
+    try:
+        body = await request.json()
+        dto = bill_dto.UpdateBillDto(**body)
+    except Exception:
+        return JSONResponse({"detail": "Invalid bill update data"}, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    db = next(get_db())
+    bill_id = uuid.UUID(bill_id)
+    updated_bill = {
+        "customer_id": dto.customer_id,
+        "amount":dto.amount,
+        "status":dto.status,
+        "description":dto.description,
+        "due_date":dto.due_date
+    }
+    result = bill_model.update_bill(db, bill_id, updated_bill)
+    if not result.success:
+        return JSONResponse(
+            content={"detail": result.error},
+           status_code= status.HTTP_404_NOT_FOUND
+        )
+
+    return (JSONResponse(
+        content=result.data.__dict__,
+        status_code= status.HTTP_200_OK)
+    )
+
+
+# DELETE bill by ID (biller or admin), only if status pending
+async def delete_bill_handler(request: Request, bill_id: str, user):
+    if user.role not in ["biller", "admin"]:
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+    try:
+        bill_uuid = uuid.UUID(bill_id)
+    except ValueError:
+        return JSONResponse({"detail": "Invalid bill ID format"}, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    db = next(get_db())
+    read_res = bill_model.get_bill_by_id(db, bill_uuid)
+
+    if not read_res.success:
+        return JSONResponse({"detail": read_res.error}, status.HTTP_404_NOT_FOUND)
+
+    bill = read_res.data
+    if bill.status != "pending":
+        return JSONResponse({"detail": "Cannot delete non-pending bill"}, status.HTTP_400_BAD_REQUEST)
+
+    result = bill_model.delete_bill(db, bill_uuid)
+    if not result.success:
+        return JSONResponse({"detail": result.error}, status.HTTP_400_BAD_REQUEST)
+
+    return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+
+
+# READ all bills by status (roles: biller/admin/customer)
+async def read_all_bills_by_status_handler(request: Request, state: str, user):
+    if user.role not in ["admin", "biller", "customer"]:
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+    db = next(get_db())
+    result = bill_model.list_many_bills_by_status(db, state)
+
+    if not result.success:
+        return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    if user.role == "admin":
+        bills = [b.__dict__ for b in result.data]
+    elif user.role == "biller":
+        bills = [b.__dict__ for b in result.data if b.biller_id == user.id]
+    elif user.role == "customer":
+        bills = [b.__dict__ for b in result.data if b.customer_id == user.id]
+    else:
+        bills = []
+
+    return JSONResponse(
+        content=bills,
+        status_code=status.HTTP_200_OK
+    )
+
+
+# LIST bills of a specific customer (biller only)
+async def list_customer_bills_handler(request: Request, cust_id: str, user):
+    if user.role != "biller":
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+    db = next(get_db())
+    cust_id = uuid.UUID(cust_id)
+    result = bill_model.get_bills_by_customer_id(db,cust_id)
+    if not result.success:
+        return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    #bills = [b.__dict__ for b in result.data if b.customer_id == customer_id and b.biller_id == user.id]
+    return JSONResponse(
+        content=result.data,
+        status_code=status.HTTP_200_OK
+    )
+
+
+# LIST bills for current biller or customer
+async def list_own_bills_handler(request: Request, user):
+    db = next(get_db())
+    if user.role == "biller":
+        result = bill_model.get_bills_by_biller_id(db, user.id)
+        if not result.success:
+            return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return JSONResponse(
+            content=result.data,
+            status_code=status.HTTP_200_OK
+        )
+
+    elif user.role == "customer":
+        result = bill_model.get_bills_by_biller_id(db, user.id)
+        if not result.success:
+            return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return JSONResponse(
+            content=result.data,
+            status_code=status.HTTP_200_OK
+        )
+    else:
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+
+# LIST all bills (admin only)
+async def list_all_bills_handler(request: Request, user):
+    if user.role != "admin":
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+    db = next(get_db())
+    result = bill_model.list_bills(db)
+    if not result.success:
+        return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return JSONResponse(content=result.data, status_code=status.HTTP_200_OK)
+
+
+# LIST bills by biller id (admin only)
+async def list_biller_bills_handler(request: Request, biller_id: str, user=None):
+    if user.role != "admin":
+        return JSONResponse({"detail": "Not authorized"}, status.HTTP_403_FORBIDDEN)
+
+    db = next(get_db())
+    biller_id = uuid.UUID(biller_id)
+    result = bill_model.get_bills_by_biller_id(db,biller_id)
+    if not result.success:
+        return JSONResponse({"detail": result.error}, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    bills = [b.__dict__ for b in result.data ]
+    return JSONResponse(bills, status.HTTP_200_OK)
+
+
+# READ report (all roles)
+# READ report (admin, biller, customer)
+async def read_report_handler(request: Request, user=None):
+    db= next(get_db())
+
+    if user.role == "admin":
+        # Fetch all data
+        all_bills = bill_model.list_bills(db)
+        all_payments = payment_history_model.list_payments(db)
+
+        # Global aggregates
+        total_billers = len(set(b.biller_id for b in all_bills.data))
+        total_customers = len(set(b.customer_id for b in all_bills.data))
+        total_bills_systemwide = len(all_bills.data)
+        total_amount_billed = sum(b.amount for b in all_bills.data)
+        total_paid_amount = sum(p.amount for p in all_payments.data)
+        total_outstanding_amount = total_amount_billed - total_paid_amount
+
+        # Monthly aggregation
+        monthly_data = defaultdict(lambda: MonthlyReportDto(month="", bills_created=0, amount_billed=0, amount_paid=0))
+        for bill in all_bills.data:
+            key = get_month_key(bill.created_at)
+            dto = monthly_data[key]
+            dto.month = key
+            dto.bills_created += 1
+            dto.amount_billed += bill.amount
+
+        for payment in all_payments.data:
+            key = get_month_key(payment.paid_on)
+            monthly_data[key].amount_paid += payment.amount
+
+        monthly_report = list(monthly_data.values())
+
+        # Top billers (by amount billed)
+        top_billers_map = defaultdict(lambda: {"bills_issued": 0, "amount_billed": 0, "paid": 0})
+        for bill in all_bills.data:
+            top_billers_map[bill.biller_id]["bills_issued"] += 1
+            top_billers_map[bill.biller_id]["amount_billed"] += bill.amount
+            if bill.status == "paid":
+                top_billers_map[bill.biller_id]["paid"] += bill.amount
+
+        top_billers = [
+            AdminTopBillerDto(
+                biller_id=biller_id,
+                biller_name="BillerName",  # Replace with actual lookup
+                bills_issued=data["bills_issued"],
+                amount_billed=data["amount_billed"],
+                paid_ratio=round(data["paid"] / data["amount_billed"], 2) if data["amount_billed"] else 0.0,
+            )
+            for biller_id, data in top_billers_map.items()
+        ]
+        top_billers = sorted(top_billers, key=lambda b: b.amount_billed, reverse=True)[:5]
+
+        # Top debtors (by outstanding amount)
+        debtors_map = defaultdict(lambda: {"outstanding": 0, "overdue": 0})
+        for bill in all_bills.data:
+            if bill.status != "paid":
+                debtors_map[bill.customer_id]["outstanding"] += bill.amount
+                if bill.status == "overdue":
+                    debtors_map[bill.customer_id]["overdue"] += 1
+
+        top_debtors = [
+            AdminTopDebtorDto(
+                customer_id=cust_id,
+                customer_name="CustomerName",  # Replace with actual lookup
+                outstanding_amount=data["outstanding"],
+                overdue_bills=data["overdue"],
+            )
+            for cust_id, data in debtors_map.items()
+        ]
+        top_debtors = sorted(top_debtors, key=lambda d: d.outstanding_amount, reverse=True)[:5]
+
+        return JSONResponse(
+            AdminReportDto(
+                total_billers=total_billers,
+                total_customers=total_customers,
+                total_bills_systemwide=total_bills_systemwide,
+                total_amount_billed=total_amount_billed,
+                total_paid_amount=total_paid_amount,
+                total_outstanding_amount=total_outstanding_amount,
+                monthly_report=monthly_report,
+                top_billers=top_billers,
+                top_debtors=top_debtors,
+            ).__dict__,
+            status_code=status.HTTP_200_OK,
+        )
+
+    elif user.role == "biller":
+        biller_id = uuid.UUID(user.id)
+        bills = bill_model.get_bills_by_biller_id(db,biller_id).data
+
+        payments = payment_history_model.read_payments_by_biller_id(db,biller_id).data
+
+        customer_map = defaultdict(lambda: {
+            "name": "CustomerName",  # Replace with lookup
+            "total_bills": 0,
+            "paid": 0,
+            "pending": 0,
+            "overdue": 0,
+            "total_billed": 0.0,
+            "total_paid": 0.0
+        })
+
+        for bill in bills:
+            c = customer_map[bill.customer_id]
+            c["total_bills"] += 1
+            c["total_billed"] += bill.amount
+            if bill.status == "paid":
+                c["paid"] += 1
+            elif bill.status == "pending":
+                c["pending"] += 1
+            elif bill.status == "overdue":
+                c["overdue"] += 1
+
+        for payment in payments:
+            customer_map[payment.customer_id]["total_paid"] += payment.amount
+
+        bills_per_customer = [
+            BillerCustomerBillSummaryDto(
+                customer_id=cust_id,
+                customer_name=data["name"],
+                total_bills=data["total_bills"],
+                paid=data["paid"],
+                pending=data["pending"],
+                overdue=data["overdue"],
+                total_billed=data["total_billed"],
+                total_paid=data["total_paid"],
+            )
+            for cust_id, data in customer_map.items()
+        ]
+
+        monthly_agg = defaultdict(lambda: MonthlyReportDto(month="", bills_created=0, amount_billed=0, amount_paid=0))
+        for bill in bills:
+            key = get_month_key(bill.created_at)
+            dto = monthly_agg[key]
+            dto.month = key
+            dto.bills_created += 1
+            dto.amount_billed += bill.amount
+
+        for payment in payments:
+            key = get_month_key(payment.paid_on)
+            monthly_agg[key].amount_paid += payment.amount
+
+        return JSONResponse(
+            BillerReportDto(
+                total_bills_issued=len(bills),
+                total_amount_billed=sum(b.amount for b in bills),
+                total_paid_amount=sum(p.amount for p in payments),
+                total_outstanding_amount=sum(b.amount for b in bills if b.status != "paid"),
+                paid_bills_count=len([b for b in bills if b.status == "paid"]),
+                pending_bills_count=len([b for b in bills if b.status == "pending"]),
+                overdue_bills_count=len([b for b in bills if b.status == "overdue"]),
+                bills_per_customer=bills_per_customer,
+                monthly_aggregation=list(monthly_agg.values()),
+            ).dict(),
+            status_code=status.HTTP_200_OK,
+        )
+
+    elif user.role == "customer":
+        cust_id = uuid.UUID(user.id)
+
+        bills = bill_model.get_bills_by_customer_id(db,cust_id).data
+        payments = payment_history_model.read_payments_by_customer_id(db,cust_id).data
+
+        bills_by_biller_map = defaultdict(lambda: {"name": "BillerName", "total_billed": 0.0, "total_paid": 0.0})
+
+        for bill in bills:
+            b = bills_by_biller_map[bill.biller_id]
+            b["total_billed"] += bill.amount
+            if bill.status == "paid":
+                b["total_paid"] += bill.amount
+
+        bills_by_biller = [
+            CustomerBillByBillerDto(
+                biller_id=biller_id,
+                biller_name=data["name"],
+                total_billed=data["total_billed"],
+                total_paid=data["total_paid"],
+                outstanding=data["total_billed"] - data["total_paid"],
+            )
+            for biller_id, data in bills_by_biller_map.items()
+        ]
+
+        payment_history = [
+            PaymentHistoryDto(
+                bill_id=payment.bill_id,
+                amount=payment.amount,
+                paid_on=payment.paid_on,
+                status="paid"  # You can update this if needed
+            )
+            for payment in payments
+        ]
+
+        return JSONResponse(
+            CustomerReportDto(
+                total_bills_received=len(bills),
+                total_amount_due=sum(b.amount for b in bills),
+                total_paid=sum(p.amount for p in payments),
+                outstanding_amount=sum(b.amount for b in bills if b.status != "paid"),
+                paid_bills=len([b for b in bills if b.status == "paid"]),
+                pending_bills=len([b for b in bills if b.status == "pending"]),
+                overdue_bills=len([b for b in bills if b.status == "overdue"]),
+                bills_by_biller=bills_by_biller,
+                payment_history=payment_history,
+            ).dict(),
+            status_code=status.HTTP_200_OK,
+        )
+
+    return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_403_FORBIDDEN)
+

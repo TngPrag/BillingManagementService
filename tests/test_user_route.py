@@ -1,0 +1,22 @@
+import requests
+
+BASE_URL = "http://localhost:8700/api/v0.1/auth"
+TOKEN = None
+
+
+def test_login():
+    global TOKEN
+    payload = {"username": "admin", "password": "Password123!"}
+
+    response = requests.post(f"{BASE_URL}/login", json=payload)
+
+    print("Status Code:", response.status_code)
+    print("Response:", response.text)
+
+    assert response.status_code in [200, 401]
+
+    if response.status_code == 200:
+        TOKEN = response.json().get("access_token")
+        assert TOKEN is not None
+        print("Access Token:", TOKEN)
+test_login()

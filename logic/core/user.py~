@@ -1,0 +1,63 @@
+# logic/core/user.py
+
+from typing import List, Optional
+from sqlalchemy.orm import Session
+from datetime import datetime
+
+from fs.fs import Base, fs_create, fs_read, fs_update, fs_delete, fs_list
+from pydantic import BaseModel, EmailStr
+from sqlalchemy import Column, Integer, String, DateTime
+
+
+# SQLAlchemy ORM model
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    full_name = Column(String, nullable=False)
+    username = Column(String, unique=True, nullable=False, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, default="customer")  # admin, biller, customer
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Pydantic DTOs for internal usage (optional, can move to DTO layer later)
+class UserCreate(BaseModel):
+    full_name: str
+    username: str
+    email: EmailStr
+    password_hash: str
+    role: str = "customer"
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+
+
+# Core logic functions that wrap fs functions
+
+def create_user(db: Session, user_data: UserCreate) -> User:
+
+    return fs_create(db, User, user_data.dict())
+
+
+def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
+    return fs_read(db, User, user_id)
+
+
+def update_user(db: Session, user_id: int, updates: UserUpdate) -> Optional[User]:
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return None
+    return fs_update(db, user, updates.dict(exclude_unset=True))
+
+
+def delete_user(db: Session, user_id: int) -> None:
+    fs_delete(db, User, user_id)
+
+
+def list_users(db: Session) -> List[User]:
+    return fs_list(db, User)

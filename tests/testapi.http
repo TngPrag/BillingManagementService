@@ -1,0 +1,8 @@
+### Login (get token)
+POST http://localhost:8000/auth/api/v0.1/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "Password123!"
+}

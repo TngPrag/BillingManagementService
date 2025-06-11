@@ -1,0 +1,100 @@
+from datetime import datetime, timedelta
+from typing import Optional, List, Callable
+
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from dotenv import load_dotenv
+import os
+from logic.core.user_model import get_user_by_username
+
+from logic.utils.db_dependency import get_db
+# Load environment variables from .env file
+load_dotenv()
+
+# Configuration
+SECRET_KEY = os.getenv("ACCESS_SECRET_KEY", "fallback_access_secret_key")
+REFRESH_SECRET_KEY = os.getenv("REFRESH_SECRET_KEY", "fallback_refresh_secret_key")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7))
+
+# OAuth2 scheme
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/auth/api/v1/login")
+
+# -----------------------------
+# JWT Token Utilities
+# -----------------------------
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
+
+
+def create_refresh_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, REFRESH_SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_refresh_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, REFRESH_SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+# -----------------------------
+# Authenticated User Retrieval
+# -----------------------------
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    payload = decode_access_token(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+    db = next(get_db())
+    user = get_user_by_username(db, username)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return user
+
+# -----------------------------
+# Role-Based Access Control
+# -----------------------------
+"""
+def get_current_user_with_roles(required_roles: List[str]) -> Callable:
+    async def _role_checker(token: str = Depends(oauth2_scheme)):
+        payload = decode_access_token(token)
+        username = payload.get("sub")
+        role = payload.get("role")
+
+        if not username or not role:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+
+        if role not in required_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Required roles: {required_roles}")
+
+        db = get_db()
+    user = await get_user_by_username(db, username)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        return user
+
+    return _role_checker
+"""
