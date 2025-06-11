@@ -655,3 +655,106 @@ Database (PostgreSQL)
                                  else if customer:
                                       customer_report
                      }
+                
+ ---
+Bill data api's
+===============
+1. Create Bill — POST /api/v0.1/bills/
+
+
+{
+  "method": "POST",
+  "url": "http://localhost:8000/api/v0.1/bills/",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "biller_id": "uuid-string",
+    "customer_id": "uuid-string",
+    "amount": 123.45,
+    "due_date": "2025-07-15T00:00:00Z",
+    "status": "pending",
+    "description": "Electricity bill for June"
+  }
+2. Read Bill by ID — GET /api/v0.1/bills/{bill_id}
+
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/your-bill-uuid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+3. Update Bill by ID — PUT /api/v0.1/bills/{bill_id}
+{
+  "method": "PUT",
+  "url": "http://localhost:8000/api/v0.1/bills/your-bill-uuid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "amount": 150.00,
+    "status": "paid",
+    "description": "Updated bill amount after adjustment"
+  }
+}
+4. Delete Bill by ID — DELETE /api/v0.1/bills/{bill_id}
+{
+  "method": "DELETE",
+  "url": "http://localhost:8000/api/v0.1/bills/your-bill-uuid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+5. Get Bills by Status — GET /api/v0.1/bills/status/{status}
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/status/paid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+6. Get Bills by Customer ID — GET /api/v0.1/bills/customer/{customer_id}
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/customer/customer-uuid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+7. Get Bills by Biller ID — GET /api/v0.1/bills/biller/{biller_id}
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/biller/biller-uuid",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+8.Get All Bills — GET /api/v0.1/bills/all
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/all",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+9.Get Own Bills — GET /api/v0.1/bills/my-bills
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/my-bills",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+10. Get Reports — GET /api/v0.1/bills/report
+{
+  "method": "GET",
+  "url": "http://localhost:8000/api/v0.1/bills/report",
+  "headers": {
+    "Authorization": "Bearer YOUR_JWT_TOKEN"
+  }
+}
+
+
