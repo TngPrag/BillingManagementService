@@ -199,6 +199,6 @@ Authorization: Bearer <your_token>
 ## 👨‍💼 Author
 
 Tsegay Negassi
-2025 © All rights reserved
+2026 © All rights reserved
 
 
